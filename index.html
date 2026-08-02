@@ -119,9 +119,18 @@
     <div class="row" style="margin-top:16px;align-items:center">
       <label class="opt"><input type="checkbox" id="shuffle"> Shuffle order</label>
       <label class="opt"><input type="checkbox" id="sound" checked> Flap sound</label>
+      <label class="opt">Flap
+        <select id="flap">
+          <option value="1.6">1.6s</option><option value="3" selected>3s</option>
+          <option value="5">5s</option><option value="8">8s</option>
+          <option value="12">12s</option><option value="16">16s</option>
+          <option value="20">20s</option><option value="30">30s</option>
+        </select>
+      </label>
       <label class="opt">Hold
         <select id="hold"><option value="1.8">1.8s</option><option value="2.6" selected>2.6s</option>
-        <option value="4">4s</option><option value="6">6s</option></select>
+        <option value="4">4s</option><option value="6">6s</option><option value="8">8s</option>
+        <option value="10">10s</option><option value="15">15s</option><option value="20">20s</option></select>
       </label>
       <label class="opt"><input type="checkbox" id="endBoard" checked> End with full board</label>
     </div>
@@ -204,7 +213,7 @@ const KEY='luckydraw:v3';
 function save(){
   try{ localStorage.setItem(KEY, JSON.stringify({
     entries, title:$('#title').value, shuffle:$('#shuffle').checked,
-    sound:$('#sound').checked, hold:$('#hold').value, endBoard:$('#endBoard').checked }));
+    sound:$('#sound').checked, flap:$('#flap').value, hold:$('#hold').value, endBoard:$('#endBoard').checked }));
   }catch(e){}
 }
 function load(){
@@ -212,7 +221,7 @@ function load(){
     if(v){ const s=JSON.parse(v);
       entries=s.entries||[]; $('#title').value=s.title||'';
       $('#shuffle').checked=!!s.shuffle; $('#sound').checked=s.sound!==false;
-      if(s.hold)$('#hold').value=s.hold; $('#endBoard').checked=s.endBoard!==false; }
+      if(s.flap)$('#flap').value=s.flap; if(s.hold)$('#hold').value=s.hold; $('#endBoard').checked=s.endBoard!==false; }
   }catch(e){}
   renderList();
 }
@@ -237,7 +246,9 @@ function hash(a,b,c){
 }
 function plan(entry, seed){
   const chars=[...String(entry.num)];
-  const stop=chars.map((_,i)=>0.55+i*0.34);
+  const T=parseFloat($('#flap').value)||3;
+  const n=chars.length;
+  const stop=chars.map((_,i)=>T*(0.42+0.58*(i+1)/n));
   const rollEnd=Math.max(...stop)+0.15;
   return {chars, stop, rollEnd, nameIn:0.5, seed};
 }
@@ -575,7 +586,7 @@ $('#add').onclick=()=>{ const n=$('#oneNum').value.trim(), nm=$('#oneName').valu
   $('#oneNum').value=''; $('#oneName').value=''; $('#oneNum').focus(); renderList(); save(); };
 $('#oneName').addEventListener('keydown',e=>{ if(e.key==='Enter') $('#add').click(); });
 $('#title').addEventListener('input',save);
-['#shuffle','#sound','#hold','#endBoard'].forEach(s=>$(s).addEventListener('change',()=>{order=[];save();}));
+['#shuffle','#sound','#flap','#hold','#endBoard'].forEach(s=>$(s).addEventListener('change',()=>{order=[];save();}));
 $('#start').onclick=()=>toStage(true);
 $('#viewBoard').onclick=boardView;
 $('#record').onclick=()=>exportMp4().catch(e=>{
