@@ -118,6 +118,7 @@
     <div class="list" id="list" style="margin-top:18px"></div>
     <div class="row" style="margin-top:16px;align-items:center">
       <label class="opt"><input type="checkbox" id="shuffle"> Shuffle order</label>
+      <label class="opt"><input type="checkbox" id="sound" checked> Flap sound</label>
       <label class="opt">Flap
         <select id="flap">
           <option value="1.6">1.6s</option><option value="3" selected>3s</option>
@@ -212,14 +213,14 @@ const KEY='luckydraw:v3';
 function save(){
   try{ localStorage.setItem(KEY, JSON.stringify({
     entries, title:$('#title').value, shuffle:$('#shuffle').checked,
-    flap:$('#flap').value, hold:$('#hold').value, endBoard:$('#endBoard').checked }));
+    sound:$('#sound').checked, flap:$('#flap').value, hold:$('#hold').value, endBoard:$('#endBoard').checked }));
   }catch(e){}
 }
 function load(){
   try{ const v=localStorage.getItem(KEY);
     if(v){ const s=JSON.parse(v);
       entries=s.entries||[]; $('#title').value=s.title||'';
-      $('#shuffle').checked=!!s.shuffle;
+      $('#shuffle').checked=!!s.shuffle; $('#sound').checked=s.sound!==false;
       if(s.flap)$('#flap').value=s.flap; if(s.hold)$('#hold').value=s.hold; $('#endBoard').checked=s.endBoard!==false; }
   }catch(e){}
   renderList();
@@ -268,6 +269,17 @@ function segments(){
   });
   if($('#endBoard').checked && order.length>1){ segs.push({type:'b', start:t, dur:4.4}); t+=4.4; }
   return {segs, total:t};
+}
+/* click times for one winner segment, offset onto the global timeline */
+function ticksFor(p, offset){
+  const out=[];
+  p.chars.forEach((target,i)=>{
+    if(!/\d/.test(target)) return;
+    const kMax=Math.floor(p.stop[i]/SPIN);
+    for(let k=1;k<=kMax;k++) if(k%3===0) out.push({t:offset+k*SPIN, strong:false});
+    out.push({t:offset+p.stop[i], strong:true});
+  });
+  return out;
 }
 
 /* ================= drawing ================= */
@@ -375,7 +387,20 @@ function drawAt(segs,total,gt){
 }
 
 /* ================= live playback ================= */
-const live={raf:0, idx:0, mode:'w', t0:0, seg:null};
+let ac=null;
+function tick(strong){
+  if(!$('#sound').checked) return;
+  try{
+    if(!ac) ac=new (window.AudioContext||window.webkitAudioContext)();
+    if(ac.state==='suspended') ac.resume();
+    const o=ac.createOscillator(), g=ac.createGain();
+    o.type='square'; o.frequency.value=strong?150:420;
+    g.gain.setValueAtTime(strong?0.55:0.12, ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime+(strong?0.09:0.03));
+    o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime+0.12);
+  }catch(e){}
+}
+const live={raf:0, idx:0, mode:'w', t0:0, seg:null, ticks:[], fired:0};
 function buildOrder(){
   order=entries.map((_,i)=>i);
   if($('#shuffle').checked)
@@ -384,6 +409,7 @@ function buildOrder(){
 function playWinner(i){
   const {segs}=segments();
   live.mode='w'; live.idx=i; live.seg=segs[i]; live.t0=performance.now();
+  live.ticks=ticksFor(segs[i].p,0); live.fired=0;
   if(!live.raf) liveLoop();
 }
 function liveLoop(){
@@ -392,6 +418,9 @@ function liveLoop(){
   const seg=live.seg; if(!seg) return;
   let t=(performance.now()-live.t0)/1000;
   if(t>seg.dur) t=seg.dur;
+  while(live.fired<live.ticks.length && live.ticks[live.fired].t<=t){
+    tick(live.ticks[live.fired].strong); live.fired++;
+  }
   drawWinner(seg,t,order.length);
 }
 function stopLive(){ cancelAnimationFrame(live.raf); live.raf=0; }
@@ -433,6 +462,23 @@ async function ensureMuxer(){
   for(const u of urls){ try{ await loadScript(u); if(window.Mp4Muxer) return true; }catch(e){} }
   return false;
 }
+async function buildAudioBuffer(ticks,total){
+  const sr=48000;
+  const oac=new OfflineAudioContext(1, Math.ceil((total+0.5)*sr), sr);
+  ticks.forEach(({t,strong})=>{
+    const o=oac.createOscillator(), g=oac.createGain();
+    o.type='square'; o.frequency.value=strong?150:420;
+    g.gain.setValueAtTime(strong?0.55:0.12, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t+(strong?0.09:0.03));
+    o.connect(g); g.connect(oac.destination); o.start(t); o.stop(t+0.13);
+  });
+  const buf=await oac.startRendering();
+  // normalise so it is actually audible on a TV
+  const d=buf.getChannelData(0);
+  let peak=0; for(let i=0;i<d.length;i++){ const a=Math.abs(d[i]); if(a>peak) peak=a; }
+  if(peak>0){ const g=Math.min(8, 0.89/peak); for(let i=0;i<d.length;i++) d[i]*=g; }
+  return buf;
+}
 async function pickCodec(){
   for(const c of ['avc1.640028','avc1.4d0028','avc1.42002A','avc1.640033']){
     try{ const r=await VideoEncoder.isConfigSupported(
@@ -459,8 +505,12 @@ async function exportMp4(){
   const codec=await pickCodec();
   if(!codec) return fail('No H.264 encoder available in this browser.');
 
-  const muxer=new Mp4Muxer.Muxer({ target:new Mp4Muxer.ArrayBufferTarget(),
-    video:{codec:'avc', width:W, height:H, frameRate:FPS}, fastStart:'in-memory' });
+  const wantAudio = $('#sound').checked && typeof AudioEncoder!=='undefined'
+    && typeof OfflineAudioContext!=='undefined';
+  const muxCfg={ target:new Mp4Muxer.ArrayBufferTarget(),
+    video:{codec:'avc', width:W, height:H, frameRate:FPS}, fastStart:'in-memory' };
+  if(wantAudio) muxCfg.audio={codec:'aac', numberOfChannels:1, sampleRate:48000};
+  const muxer=new Mp4Muxer.Muxer(muxCfg);
 
   let encErr=null;
   const venc=new VideoEncoder({
@@ -485,6 +535,28 @@ async function exportMp4(){
   }
   await venc.flush();
 
+  if(wantAudio){
+    try{
+      $('#recStat').textContent='Adding sound…';
+      const allTicks=[];
+      segs.filter(x=>x.type==='w').forEach(x=>allTicks.push(...ticksFor(x.p,x.start)));
+      const buf=await buildAudioBuffer(allTicks,total);
+      const aenc=new AudioEncoder({output:(c,m)=>muxer.addAudioChunk(c,m),error:()=>{}});
+      aenc.configure({codec:'mp4a.40.2', sampleRate:48000, numberOfChannels:1, bitrate:192000});
+      const data=buf.getChannelData(0), N=1024;
+      for(let i=0;i<data.length;i+=N){
+        const slice=data.slice(i,Math.min(i+N,data.length));
+        aenc.encode(new AudioData({format:'f32-planar', sampleRate:48000,
+          numberOfFrames:slice.length, numberOfChannels:1,
+          timestamp:Math.round(i/48000*1e6), data:slice}));
+        if((i/N)%200===0){
+          $('#fill').style.width=(88+i/data.length*10)+'%';
+          await new Promise(r=>setTimeout(r,0));
+        }
+      }
+      await aenc.flush();
+    }catch(e){ console.warn('audio skipped', e); }
+  }
 
   $('#fill').style.width='100%';
   muxer.finalize();
@@ -524,7 +596,7 @@ $('#add').onclick=()=>{ const n=$('#oneNum').value.trim(), nm=$('#oneName').valu
   $('#oneNum').value=''; $('#oneName').value=''; $('#oneNum').focus(); renderList(); save(); };
 $('#oneName').addEventListener('keydown',e=>{ if(e.key==='Enter') $('#add').click(); });
 $('#title').addEventListener('input',save);
-['#shuffle','#flap','#hold','#endBoard'].forEach(s=>$(s).addEventListener('change',()=>{order=[];save();}));
+['#shuffle','#sound','#flap','#hold','#endBoard'].forEach(s=>$(s).addEventListener('change',()=>{order=[];save();}));
 $('#start').onclick=()=>toStage(true);
 $('#viewBoard').onclick=boardView;
 $('#record').onclick=()=>exportMp4().catch(e=>{
